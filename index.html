@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#070908">
 <title>Momentum — Habit Tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 :root{
   --bg:#070908;--bg2:#0c100d;--panel:rgba(20,25,21,.64);--panel2:rgba(12,16,13,.78);
@@ -204,9 +205,35 @@ body{
   .money-entry .money-delete{grid-column:3;grid-row:1}
 }
 @media(max-width:500px){.money-form{grid-template-columns:1fr}.money-form .full{grid-column:auto}}
+.cloud-btn{border:1px solid rgba(57,211,83,.24);background:rgba(57,211,83,.08);color:#bff8c8;border-radius:12px;padding:9px 12px;font-weight:800;font-size:11px;display:flex;align-items:center;gap:7px}
+.cloud-dot{width:7px;height:7px;border-radius:50%;background:#777;box-shadow:0 0 0 3px rgba(255,255,255,.04)}
+.cloud-dot.on{background:#39d353;box-shadow:0 0 12px rgba(57,211,83,.65)}
+.cloud-modal{position:fixed;inset:0;background:rgba(0,0,0,.68);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);display:none;align-items:center;justify-content:center;padding:18px;z-index:9999}
+.cloud-modal.show{display:flex}.cloud-card{width:min(520px,100%);padding:22px}.cloud-card h3{margin:0 0 6px;font-size:20px}.cloud-card p{margin:0 0 16px;color:var(--muted);font-size:11px;line-height:1.55}.cloud-field{margin:10px 0}.cloud-field label{display:block;font-size:10px;color:var(--muted);margin-bottom:5px}.cloud-field input{width:100%;padding:11px 12px;border-radius:11px;border:1px solid var(--line);background:rgba(0,0,0,.22);color:var(--text);outline:none}.cloud-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.cloud-status{font-size:10px;color:#9ca79d;min-height:16px;margin-top:10px}.cloud-status.ok{color:#79ee8b}.cloud-status.err{color:#ff8f8f}.cloud-small{font-size:9px!important;margin-top:12px!important}.cloud-user{font-size:10px;color:#9ca79d;margin-top:8px}
+
 </style>
 </head>
 <body>
+
+<div id="cloudModal" class="cloud-modal" onclick="if(event.target===this)closeCloud()">
+  <div class="glass cloud-card">
+    <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+      <div><div class="money-kicker">MOMENTUM CLOUD</div><h3>Keep your data forever.</h3><p>Habits, hours, goals, growth and Money Made can sync to your own Supabase database. Your browser keeps a local backup too.</p></div>
+      <button class="icon" onclick="closeCloud()">×</button>
+    </div>
+    <div class="cloud-field"><label>Supabase project URL</label><input id="sbUrl" placeholder="https://xxxxx.supabase.co" autocomplete="off"></div>
+    <div class="cloud-field"><label>Supabase publishable / anon key</label><input id="sbKey" placeholder="sb_publishable_..." autocomplete="off"></div>
+    <div class="cloud-actions"><button class="btn primary" onclick="saveCloudConfig()">Save connection</button><button class="btn" onclick="clearCloudConfig()">Clear</button></div>
+    <div style="height:1px;background:var(--line);margin:17px 0"></div>
+    <div class="cloud-field"><label>Email</label><input id="cloudEmail" type="email" placeholder="you@example.com" autocomplete="email"></div>
+    <div class="cloud-field"><label>Password</label><input id="cloudPassword" type="password" placeholder="At least 6 characters" autocomplete="current-password"></div>
+    <div class="cloud-actions"><button class="btn primary" onclick="cloudSignIn()">Sign in</button><button class="btn" onclick="cloudSignUp()">Create account</button><button class="btn" onclick="cloudSignOut()">Sign out</button></div>
+    <div id="cloudStatus" class="cloud-status"></div>
+    <div id="cloudUser" class="cloud-user"></div>
+    <p class="cloud-small">Security: use only the browser-safe publishable/anon key. Never put a Supabase <b>service_role</b> key here. RLS policies in the setup SQL protect each user's data.</p>
+  </div>
+</div>
+
 <div class="app">
 <header class="top">
   <div class="brand">
@@ -214,6 +241,7 @@ body{
     <div><h1>Momentum<span class="brand-dot">.</span></h1><div class="sub">Personal operating system</div></div>
   </div>
   <nav class="nav">
+    <button class="cloud-btn" onclick="openCloud()"><span id="cloudDot" class="cloud-dot"></span><span id="cloudLabel">Cloud</span></button>
     <button id="overallTab" class="active" onclick="show('overall')"><span>⌂</span> Overview</button>
     <button id="addTab" onclick="show('add')"><span>＋</span> Add field</button>
   </nav>
@@ -346,11 +374,86 @@ let selectedDetailDate=null;
 let detailMonthOffset=0;
 let recognition=null;
 let jarvisListening=false;
+let cloudClient=null,cloudUser=null,cloudSyncTimer=null,cloudSyncing=false;
+const CLOUD_KEY="momentum-supabase-config-v1";
 try{let x=JSON.parse(localStorage.getItem(KEY));if(x)state=x}catch(e){}
 if(!Array.isArray(state.habits))state.habits=[];if(!state.days)state.days={};if(!Array.isArray(state.money))state.money=[];;
 state.habits.forEach(h=>{if(!h.deadline)h.deadline=""});
 
-function save(){try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}}
+function save(){
+  try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}
+  if(cloudUser) scheduleCloudSync();
+}
+function cloudConfig(){try{return JSON.parse(localStorage.getItem(CLOUD_KEY)||"null")}catch(e){return null}}
+function setCloudStatus(msg,type=""){let el=document.getElementById("cloudStatus");if(!el)return;el.textContent=msg;el.className="cloud-status "+type}
+function updateCloudUI(){
+  let dot=document.getElementById("cloudDot"),label=document.getElementById("cloudLabel"),u=document.getElementById("cloudUser");
+  if(cloudUser){dot.classList.add("on");label.textContent="Synced";if(u)u.textContent="Signed in as "+cloudUser.email;}
+  else{dot.classList.remove("on");label.textContent="Cloud";if(u)u.textContent="";}
+}
+function openCloud(){
+  let c=cloudConfig()||{};document.getElementById("sbUrl").value=c.url||"";document.getElementById("sbKey").value=c.key||"";
+  document.getElementById("cloudModal").classList.add("show");updateCloudUI();
+  if(!c.url||!c.key)setCloudStatus("First create a Supabase project and paste its URL + publishable/anon key here.");
+  else if(cloudUser)setCloudStatus("Cloud sync is active.","ok");
+}
+function closeCloud(){document.getElementById("cloudModal").classList.remove("show")}
+function clearCloudConfig(){localStorage.removeItem(CLOUD_KEY);cloudClient=null;cloudUser=null;updateCloudUI();setCloudStatus("Connection cleared. Local data is still safe in this browser.")}
+async function initCloud(){
+  let c=cloudConfig();if(!c?.url||!c?.key||!window.supabase)return;
+  try{
+    cloudClient=window.supabase.createClient(c.url,c.key,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+    const {data}=await cloudClient.auth.getSession();
+    cloudUser=data?.session?.user||null;updateCloudUI();
+    cloudClient.auth.onAuthStateChange((_event,session)=>{cloudUser=session?.user||null;updateCloudUI();if(cloudUser)setTimeout(loadCloudState,0)});
+    if(cloudUser) await loadCloudState();
+  }catch(e){setCloudStatus("Cloud connection failed: "+(e.message||e),"err")}
+}
+async function saveCloudConfig(){
+  const url=document.getElementById("sbUrl").value.trim().replace(/\/$/,"");const key=document.getElementById("sbKey").value.trim();
+  if(!/^https:\/\/[^\s]+$/.test(url)||!key)return setCloudStatus("Enter a valid Supabase URL and publishable/anon key.","err");
+  localStorage.setItem(CLOUD_KEY,JSON.stringify({url,key}));
+  setCloudStatus("Connecting…");await initCloud();
+  if(cloudClient)setCloudStatus("Connection saved. Now sign in or create your account.","ok");
+}
+async function cloudSignUp(){
+  if(!cloudClient)return setCloudStatus("Save the Supabase connection first.","err");
+  const email=document.getElementById("cloudEmail").value.trim(),password=document.getElementById("cloudPassword").value;
+  if(!email||password.length<6)return setCloudStatus("Enter an email and a password of at least 6 characters.","err");
+  const {data,error}=await cloudClient.auth.signUp({email,password});
+  if(error)return setCloudStatus(error.message,"err");
+  cloudUser=data?.user||null;updateCloudUI();
+  if(data?.session){await loadCloudState();setCloudStatus("Account created and cloud sync is active.","ok")}else setCloudStatus("Account created. Check your email to confirm it, then sign in.","ok");
+}
+async function cloudSignIn(){
+  if(!cloudClient)return setCloudStatus("Save the Supabase connection first.","err");
+  const email=document.getElementById("cloudEmail").value.trim(),password=document.getElementById("cloudPassword").value;
+  const {data,error}=await cloudClient.auth.signInWithPassword({email,password});
+  if(error)return setCloudStatus(error.message,"err");
+  cloudUser=data?.user||null;updateCloudUI();await loadCloudState();setCloudStatus("Signed in. Your Momentum data is now cloud-backed.","ok");
+}
+async function cloudSignOut(){if(!cloudClient)return;await cloudClient.auth.signOut();cloudUser=null;updateCloudUI();setCloudStatus("Signed out. Local backup remains available.")}
+async function loadCloudState(){
+  if(!cloudClient||!cloudUser)return;
+  setCloudStatus("Loading cloud data…");
+  const {data,error}=await cloudClient.from("momentum_state").select("data").eq("user_id",cloudUser.id).maybeSingle();
+  if(error){setCloudStatus("Cloud read failed: "+error.message,"err");return}
+  if(data?.data){
+    state=data.data;if(!Array.isArray(state.habits))state.habits=[];if(!state.days)state.days={};if(!Array.isArray(state.money))state.money=[];state.habits.forEach(h=>{if(!h.deadline)h.deadline=""});
+    localStorage.setItem(KEY,JSON.stringify(state));render();setCloudStatus("Cloud data loaded.","ok");
+  }else{
+    await syncCloudNow();setCloudStatus("Cloud account is ready. Your current local data has been backed up.","ok");
+  }
+}
+function scheduleCloudSync(){clearTimeout(cloudSyncTimer);cloudSyncTimer=setTimeout(syncCloudNow,700)}
+async function syncCloudNow(){
+  if(!cloudClient||!cloudUser||cloudSyncing)return;cloudSyncing=true;
+  try{
+    const {error}=await cloudClient.from("momentum_state").upsert({user_id:cloudUser.id,data:state,updated_at:new Date().toISOString()},{onConflict:"user_id"});
+    if(error)console.warn("Momentum cloud sync:",error.message);
+    else updateCloudUI();
+  }catch(e){console.warn("Momentum cloud sync:",e)}finally{cloudSyncing=false}
+}
 function key(d){return d.toLocaleDateString("en-CA")}
 function today(){return key(new Date())}
 function dateObj(k){let [y,m,d]=k.split("-").map(Number);return new Date(y,m-1,d)}
@@ -699,6 +802,7 @@ function editGoal(id){
 function removeHabit(id){let h=state.habits.find(x=>x.id===id);if(!h)return;if(!confirm('Delete "'+h.name+'"? All its task history will be removed.'))return;state.habits=state.habits.filter(x=>x.id!==id);Object.keys(state.days).forEach(k=>{if(state.days[k])delete state.days[k][id]});save();currentHabit=null;show("overall")}
 
 render();
+initCloud();
 (function(){
  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
  const secure=window.isSecureContext;
